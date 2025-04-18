@@ -3,20 +3,24 @@ import platform
 import logging
 import shutil
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from pathlib import Path
 from abc import ABC, abstractmethod
-from local_env_setup.core.logging import setup_logger
+from local_env_setup.core.logging import setup_logger, get_logger
 from local_env_setup.core.monitoring import SetupMonitor
 from local_env_setup.utils.shell import run_command
 from local_env_setup.utils.file import create_directory, append_to_file
 
 class BaseSetup(ABC):
-    """Base class for all setup modules."""
+    """Base class for all setup components.
+    
+    This class provides common functionality for setup components,
+    including platform checks, command execution, and file operations.
+    """
     
     def __init__(self):
-        """Initialize the setup class."""
-        self.logger = logging.getLogger(self.__class__.__name__)
+        """Initialize the base setup component."""
+        self.logger = get_logger(self.__class__.__name__)
         self.setup_logging()
         self.system = platform.system()
         self.is_macos = self.system == "Darwin"
@@ -31,11 +35,15 @@ class BaseSetup(ABC):
         )
     
     def check_platform(self) -> bool:
-        """Check if the current platform is supported."""
+        """Check if the current platform is supported.
+        
+        Returns:
+            bool: True if the platform is supported, False otherwise
+        """
         self.monitor.start_step("platform_check")
         try:
             if not self.is_macos:
-                self.logger.error("This setup is only supported on macOS")
+                self.logger.error(f"Unsupported platform: {self.system}")
                 self.monitor.end_step(False, "Unsupported platform")
                 return False
             self.monitor.end_step(True)
@@ -44,25 +52,39 @@ class BaseSetup(ABC):
             self.monitor.end_step(False, str(e))
             return False
     
-    def is_command_available(self, command: str) -> bool:
-        """Check if a command is available in the system."""
-        self.monitor.start_step(f"check_command_{command}")
+    def is_command_available(self, cmd: str) -> bool:
+        """Check if a command is available in the system.
+        
+        Args:
+            cmd: Command to check
+            
+        Returns:
+            bool: True if the command exists, False otherwise
+        """
+        self.monitor.start_step(f"check_command_{cmd}")
         try:
-            subprocess.run(["which", command], check=True, capture_output=True)
+            if shutil.which(cmd) is None:
+                self.monitor.end_step(False, f"Command not found: {cmd}")
+                return False
             self.monitor.end_step(True)
             return True
-        except subprocess.CalledProcessError:
-            self.monitor.end_step(False, f"Command not found: {command}")
-            return False
         except Exception as e:
             self.monitor.end_step(False, str(e))
             return False
     
-    def run_command(self, command: List[str], cwd: Optional[str] = None) -> bool:
-        """Run a shell command and return success status."""
-        self.monitor.start_step(f"run_command_{'_'.join(command)}")
+    def run_command(self, cmd: List[str], shell: bool = False) -> bool:
+        """Run a command and return its success status.
+        
+        Args:
+            cmd: Command to run as a list of strings
+            shell: Whether to run the command in a shell
+            
+        Returns:
+            bool: True if the command succeeded, False otherwise
+        """
+        self.monitor.start_step(f"run_command_{'_'.join(cmd)}")
         try:
-            subprocess.run(command, check=True, cwd=cwd)
+            subprocess.run(cmd, check=True, shell=shell)
             self.monitor.end_step(True)
             return True
         except subprocess.CalledProcessError as e:
@@ -91,8 +113,15 @@ class BaseSetup(ABC):
         except Exception as e:
             self.monitor.end_step(False, f"Rollback failed: {e}")
             
-    def create_directory(self, path: str) -> bool:
-        """Create a directory and add rollback step."""
+    def create_directory(self, path: Union[str, Path]) -> bool:
+        """Create a directory if it doesn't exist.
+        
+        Args:
+            path: Path to create
+            
+        Returns:
+            bool: True if directory exists or was created, False otherwise
+        """
         self.monitor.start_step(f"create_directory_{path}")
         try:
             Path(path).mkdir(parents=True, exist_ok=True)
@@ -102,30 +131,36 @@ class BaseSetup(ABC):
             })
             self.monitor.end_step(True)
             return True
-        except Exception as e:
+        except OSError as e:
+            self.logger.error(f"Failed to create directory {path}: {e}")
             self.monitor.end_step(False, str(e))
             return False
             
-    def append_to_file(self, filepath: str, content: str) -> bool:
-        """Append content to a file and add rollback step."""
-        self.monitor.start_step(f"append_to_file_{filepath}")
+    def append_to_file(self, path: Union[str, Path], content: str) -> bool:
+        """Append content to a file.
+        
+        Args:
+            path: Path to the file
+            content: Content to append
+            
+        Returns:
+            bool: True if content was appended successfully, False otherwise
+        """
+        self.monitor.start_step(f"append_to_file_{path}")
         try:
-            original_content = None
-            if Path(filepath).exists():
-                with open(filepath, "r") as f:
-                    original_content = f.read()
-                    
-            with open(filepath, "a") as f:
+            path = Path(path)
+            if not path.parent.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('a') as f:
                 f.write(content)
-                
             self.add_rollback_step({
                 "function": lambda p, c: Path(p).write_text(c) if c else Path(p).unlink(),
-                "args": [filepath, original_content]
+                "args": [path, content]
             })
-            
             self.monitor.end_step(True)
             return True
-        except Exception as e:
+        except OSError as e:
+            self.logger.error(f"Failed to append to file {path}: {e}")
             self.monitor.end_step(False, str(e))
             return False
             
@@ -150,31 +185,36 @@ class BaseSetup(ABC):
             self.logger.error(f"Failed to backup {filepath}: {e}")
             return False
             
-    def get_command_output(self, command: list) -> str:
-        """Get the output of a command.
+    def get_command_output(self, cmd: List[str], shell: bool = False) -> Optional[str]:
+        """Run a command and return its output.
         
         Args:
-            command (list): Command to run and its arguments
+            cmd: Command to run as a list of strings
+            shell: Whether to run the command in a shell
             
         Returns:
-            str: Command output or empty string if command fails
+            str: Command output if successful, None otherwise
         """
+        self.monitor.start_step(f"get_command_output_{'_'.join(cmd)}")
         try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            return result.stdout.strip()
+            result = subprocess.run(cmd, capture_output=True, check=True, shell=shell)
+            output = result.stdout.decode('utf-8').strip() if result.stdout else None
+            self.monitor.end_step(True)
+            return output
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Command failed: {e}")
-            return ""
+            self.monitor.end_step(False, f"Command failed: {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Error running command: {e}")
-            return ""
+            self.monitor.end_step(False, f"Error running command: {e}")
+            return None
     
     @abstractmethod
-    def run(self):
-        """Run the setup process."""
+    def run(self) -> bool:
+        """Run the setup process.
+        
+        Returns:
+            bool: True if setup was successful, False otherwise
+        """
         pass 

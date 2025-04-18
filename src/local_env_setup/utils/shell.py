@@ -2,7 +2,7 @@
 
 import subprocess
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -30,4 +30,17 @@ def run_command(command: List[str], cwd: Optional[str] = None) -> Tuple[bool, st
         return False, e.stderr
     except Exception as e:
         logger.error(f"Error running command: {str(e)}")
-        return False, str(e) 
+        return False, str(e)
+
+def get_command_output(command: List[str], cwd: Optional[str] = None) -> Optional[str]:
+    """Run a shell command and return its output if successful.
+    
+    Args:
+        command (List[str]): The command to run as a list of strings
+        cwd (Optional[str]): Working directory to run the command in
+        
+    Returns:
+        Optional[str]: Command output if successful, None otherwise
+    """
+    success, output = run_command(command, cwd)
+    return output if success else None 
